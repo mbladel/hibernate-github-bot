@@ -1,9 +1,11 @@
 package org.hibernate.infra.bot;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 
 import org.hibernate.infra.bot.config.DeploymentConfig;
@@ -13,8 +15,6 @@ import org.hibernate.infra.bot.util.CommitMessages;
 import org.jboss.logging.Logger;
 
 import io.quarkiverse.githubapp.ConfigFile;
-import io.quarkiverse.githubapp.event.CheckRun;
-import io.quarkiverse.githubapp.event.CheckSuite;
 import io.quarkiverse.githubapp.event.PullRequest;
 import jakarta.inject.Inject;
 import org.kohsuke.github.GHEventPayload;
@@ -33,7 +33,7 @@ public class EditPullRequestBodyAddIssueLinks {
 
 	private static final String END_MARKER = "<!-- Hibernate GitHub Bot issue links end -->";
 
-	private static final String EDITOR_WARNING = "<!-- THIS SECTION IS AUTOMATICALLY GENERATED, ANY MANUAL CHANGES WILL BE LOST -->\n";
+	private static final String EDITOR_WARNING = "<!-- AUTOMATICALLY GENERATED, MANUAL CHANGES WILL BE LOST -->\n";
 
 	private static final String LINK_TEMPLATE = "https://hibernate.atlassian.net/browse/%s";
 
@@ -80,36 +80,19 @@ public class EditPullRequestBodyAddIssueLinks {
 			return;
 		}
 
-		final String originalBody = pullRequest.getBody();
-		final StringBuilder sb = new StringBuilder();
-		if ( originalBody != null ) {
-			// Check if the body already contains the link section
-			final int startIndex = originalBody.indexOf( START_MARKER );
-			final int endIndex = startIndex > -1 ? originalBody.indexOf( END_MARKER ) : -1;
-			if ( startIndex > -1 && endIndex > -1 ) {
-				// Remove the whole section, it will be re-appended at the end of the body
-				sb.append( originalBody.substring( 0, startIndex ).trim() );
-				final String following = originalBody.substring( endIndex + END_MARKER.length() ).trim();
-				if ( following.length() > 0 ) {
-					sb.append( "\n\n" );
-					sb.append( following );
-				}
-			}
-			else {
-				sb.append( originalBody.trim() );
-			}
-		}
+		final String originalBody = Objects.toString( pullRequest.getBody(), "" );
+		// Check if the body already contains the link section
+		final int startIndex = originalBody.indexOf( START_MARKER );
+		final int endIndex = startIndex > -1 ? originalBody.indexOf( END_MARKER ) : -1;
 
-		final String body = sb.toString();
-		final String linksSection = constructLinksSection( issueKeys, body );
+		final String linksSection = constructLinksSection( issueKeys, originalBody, startIndex, endIndex );
 		if ( linksSection == null ) {
 			// All issue links were already found in the request body, nothing to do
 			return;
 		}
 
-		final String newBody = body.length() == 0
-				? linksSection
-				: body + "\n\n" + linksSection;
+		final String body = removeLinksSection( originalBody, startIndex, endIndex );
+		final String newBody = body.isEmpty() ? linksSection : body + "\n\n" + linksSection;
 		if ( !deploymentConfig.isDryRun() ) {
 			pullRequest.setBody( newBody );
 		}
@@ -118,22 +101,52 @@ public class EditPullRequestBodyAddIssueLinks {
 		}
 	}
 
-	private String constructLinksSection(Set<String> issueKeys, String originalBody) {
+	private String constructLinksSection(Set<String> issueKeys, String originalBody, int startIndex, int endIndex) {
 		final String lowerCaseBody = originalBody.toLowerCase( Locale.ROOT );
-		final StringBuilder sb = new StringBuilder();
+		final List<String> keys = new ArrayList<>( issueKeys.size() );
+		boolean foundNewKey = false;
 		for ( String key : issueKeys ) {
-			if ( !lowerCaseBody.contains( key.toLowerCase( Locale.ROOT ) ) ) {
-				// Only add links for issue keys that are not already found
-				// in the original PR body
-				sb.append( String.format( LINK_TEMPLATE, key ) ).append( '\n' );
+			final int index = lowerCaseBody.indexOf( key.toLowerCase( Locale.ROOT ) );
+			// Add links for issue keys that are not already found in the original PR body
+			// or that were already in the links section
+			if ( index < 0 ) {
+				// We found a key that was not already contained in the links section
+				foundNewKey = true;
+				keys.add( key );
+			}
+			else if ( index > startIndex && index < endIndex ) {
+				keys.add( key );
 			}
 		}
 
-		if ( sb.isEmpty() ) {
+		if ( keys.isEmpty() || !foundNewKey ) {
 			return null;
 		}
 
+		// Try to pre-size the StringBuilder with the correct capacity
+		final int linkSize = LINK_TEMPLATE.length() + keys.get( 0 ).length() + 1;
+		final StringBuilder sb = new StringBuilder( linkSize * keys.size() );
+		for ( final String key : keys ) {
+			sb.append( String.format( LINK_TEMPLATE, key ) ).append( '\n' );
+		}
 		return START_MARKER + "\n" + EDITOR_WARNING + sb + END_MARKER;
+	}
+
+	private static String removeLinksSection(String originalBody, int startIndex, int endIndex) {
+		if ( startIndex > -1 && endIndex > -1 ) {
+			final StringBuilder sb = new StringBuilder();
+			// Remove the whole section, it will be re-appended at the end of the body
+			sb.append( originalBody.substring( 0, startIndex ).trim() );
+			final String following = originalBody.substring( endIndex + END_MARKER.length() ).trim();
+			if ( !following.isEmpty() ) {
+				sb.append( "\n\n" );
+				sb.append( following );
+			}
+			return sb.toString();
+		}
+		else {
+			return originalBody.trim();
+		}
 	}
 
 	private boolean shouldCheck(GHRepository repository, GHPullRequest pullRequest) {
